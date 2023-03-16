@@ -1,96 +1,58 @@
-import sys
-import torch
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit, QTextEdit, QProgressBar
-from transformers import GPT2LMHeadModel, GPT2Tokenizer, GPT2Config, GPT2LMHeadModel, TextDataset, DataCollatorForLanguageModeling
-from transformers import Trainer, TrainingArguments
-from datasets import load_dataset
+import os
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, Trainer
+from datasets import load_dataset, Dataset
+
+# Load tokenizer and model
+tokenizer = AutoTokenizer.from_pretrained("gpt2")
+model = AutoModelForCausalLM.from_pretrained("gpt2")
+
+# Set the pad_token to the eos_token
+tokenizer.pad_token = tokenizer.eos_token
+
+# Load the dataset
+datasets = load_dataset("conv_ai_2")
+train_data, val_data = train_test_split(datasets["train"].to_pandas(), test_size=0.1)
+
+train_dataset = Dataset.from_pandas(train_data)
+val_dataset = Dataset.from_pandas(val_data)
+
+def tokenize_function(examples):
+    dialog_texts = [' '.join([turn["text"] for turn in dialog]) for dialog in examples['dialog']]
+    return tokenizer(dialog_texts, padding="max_length", truncation=True, max_length=128)
+
+train_dataset = train_dataset.map(tokenize_function, batched=True)
+val_dataset = val_dataset.map(tokenize_function, batched=True)
 
 
-class GPT2FineTuner(QWidget):
-    def __init__(self):
-        super().__init__()
+# Create a data collator
+from transformers import DataCollatorForLanguageModeling
 
-        self.tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-        self.model = GPT2LMHeadModel.from_pretrained("gpt2")
+data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
-        self.train_button = QPushButton("Train", self)
-        self.train_button.clicked.connect(self.fine_tune_gpt2)
-
-        self.progress_label = QLabel("Training Progress:")
-        self.progress_bar = QProgressBar(self)
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("GPT-2 Fine-tuning"))
-        layout.addWidget(self.train_button)
-        layout.addWidget(self.progress_label)
-        layout.addWidget(self.progress_bar)
-
+# Set up the training arguments
+training_args = TrainingArguments(
+    output_dir="chatbot_model",
+    overwrite_output_dir=True,
+    num_train_epochs=1,
+    per_device_train_batch_size=8,
+    per_device_eval_batch_size=8,
+    evaluation_strategy="epoch",
+    save_strategy="epoch",
+    logging_dir="./logs",
+    logging_steps=200,
     
+)
 
-    def fine_tune_gpt2(self):
-        def tokenize_function(example):
-            question = example["question"]
-            context = example["context"]
-            answer0 = example["answer0"]
-            answer1 = example["answer1"]
-            answer2 = example["answer2"]
-            answer3 = example["answer3"]
-            label = int(example["label"])  # Convert the label value to integer
-            correct_answer = [answer0, answer1, answer2, answer3][label]
+# Create the Trainer
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=train_dataset,
+    eval_dataset=val_dataset,
+    data_collator=data_collator,
+)
 
-            question_input = self.tokenizer(question, return_tensors="pt")
-            context_input = self.tokenizer(context, return_tensors="pt")
-            answer_input = self.tokenizer(correct_answer, return_tensors="pt")
-
-            input_ids = torch.cat([question_input["input_ids"], context_input["input_ids"], answer_input["input_ids"]], dim=1)
-            attention_mask = torch.cat([question_input["attention_mask"], context_input["attention_mask"], answer_input["attention_mask"]], dim=1)
-
-            return {"input_ids": input_ids[0], "attention_mask": attention_mask[0]}
-
-
-        data = load_dataset("cosmos_qa")
-        tokenized_texts = data.map(tokenize_function, batched=True, remove_columns=["id", "context", "question", "answer0", "answer1", "answer2", "answer3", "label"])
-
-        config = GPT2Config.from_pretrained("gpt2")
-        block_size = config.n_ctx
-
-        training_args = TrainingArguments(
-            output_dir="./trained_model",
-            overwrite_output_dir=True,
-            num_train_epochs=1,
-            per_device_train_batch_size=2,
-            save_steps=10_000,
-            save_total_limit=2,
-            logging_steps=100,
-            logging_dir="./logs",
-            report_to="none",
-            disable_tqdm=True,
-        )
-
-        data_collator = DataCollatorForLanguageModeling(tokenizer=self.tokenizer, mlm=False)
-        trainer = Trainer(
-            model=self.model,
-            args=training_args,
-            data_collator=data_collator,
-            train_dataset=tokenized_texts["train"],
-        )
-
-        self.progress_bar.setValue(0)
-        total_steps = len(trainer.train_dataloader())
-
-        def on_log(args, state, control, logs):
-            step = state.global_step
-            self.progress_bar.setValue(step / total_steps * 100)
-
-        training_args._on_log = on_log
-        trainer.train()
-
-        self.model.save_pretrained("./trained_model")
-
-
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    fine_tuner = GPT2FineTuner()
-    fine_tuner.show()
-    sys.exit(app.exec_())
+# Train the model
+trainer.train()
